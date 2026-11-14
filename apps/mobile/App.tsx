@@ -1,43 +1,90 @@
-import React, { useState } from 'react';
-import { SafeAreaView, View, Text, TouchableOpacity, ScrollView, StyleSheet, Alert } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { SafeAreaView, View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Alert, Linking } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import { StatusBar } from 'expo-status-bar';
 
 const API = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:3000';
+type Item = { name: string; brand?: string; warrantyEndDate?: string; warrantyMonths?: number };
 export default function App() {
+  const [token, setToken] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [tab, setTab] = useState('products');
+  const [products, setProducts] = useState<any[]>([]);
+  const [invoices, setInvoices] = useState<any[]>([]);
+  const [expiring, setExpiring] = useState<any[]>([]);
+  const [draft, setDraft] = useState<any>(null);
+  const [invoiceId, setInvoiceId] = useState('');
   const [busy, setBusy] = useState(false);
+  async function request(path: string, options: RequestInit = {}) {
+    const response = await fetch(API + path, { ...options, headers: { Authorization: 'Bearer ' + token, ...(options.headers || {}) } });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || 'Request failed');
+    return result;
+  }
+  async function auth(action: 'register'|'login') {
+    setBusy(true);
+    try {
+      const response = await fetch(API + '/auth/' + action, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ email, password }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || 'Authentication failed');
+      setToken(data.token);
+    } catch(e) { Alert.alert('Sign in', String(e)); } finally { setBusy(false); }
+  }
+  async function refresh() {
+    try {
+      const [p,i,w] = await Promise.all([request('/products'),request('/invoices'),request('/warranties/expiring?days=30')]);
+      setProducts(p); setInvoices(i); setExpiring(w);
+    } catch(e) { Alert.alert('Unable to load', String(e)); }
+  }
+  useEffect(() => { if (token) refresh(); }, [token]);
   async function upload() {
-    const selected = await DocumentPicker.getDocumentAsync({ type: ['application/pdf','image/jpeg','image/png'], copyToCacheDirectory: true });
+    const selected = await DocumentPicker.getDocumentAsync({ type:['application/pdf','image/jpeg','image/png'],copyToCacheDirectory:true });
     if (selected.canceled) return;
     const file = selected.assets[0];
     const form = new FormData();
-    form.append('file', { uri: file.uri, name: file.name, type: file.mimeType || 'application/pdf' } as any);
+    form.append('file', { uri:file.uri,name:file.name,type:file.mimeType || 'application/pdf' } as any);
     setBusy(true);
     try {
-      const response = await fetch(API + '/invoices/upload', { method: 'POST', body: form });
-      if (!response.ok) throw new Error('Upload failed (' + response.status + ')');
-      Alert.alert('Invoice uploaded', 'File staged successfully. AI extraction and permanent saving will be added next.');
-    } catch (error) {
-      Alert.alert('Upload error', String(error));
-    } finally { setBusy(false); }
+      const result = await request('/invoices/upload', { method:'POST',body:form });
+      setInvoiceId(result.id);
+      try {
+        const extracted = await request('/invoices/' + result.id + '/extract', { method:'POST' });
+        setDraft({ ...extracted.preview, items: extracted.preview.items?.length ? extracted.preview.items : [{ name:'' }] });
+        setTab('review');
+      } catch {
+        setDraft({ invoiceNumber:'',seller:'',purchaseDate:'',items:[{name:''}] });
+        setTab('review');
+        Alert.alert('Manual review', 'AI extraction unavailable. Enter your purchase details manually.');
+      }
+    } catch(e) { Alert.alert('Upload failed',String(e)); } finally { setBusy(false); }
   }
-  return <SafeAreaView style={styles.root}><StatusBar style="dark"/><ScrollView contentContainerStyle={styles.body}>
-    <Text style={styles.title}>Invoice Vault</Text>
-    <Text style={styles.subtitle}>Your purchases, invoices and warranties in one place.</Text>
-    <View style={styles.panel}><Text style={styles.heading}>Never miss a warranty</Text><Text style={styles.note}>Upload a receipt and keep the original ready for future claims.</Text></View>
-    <TouchableOpacity style={styles.button} disabled={busy} onPress={upload}><Text style={styles.buttonText}>{busy ? 'Uploading…' : '+ Upload invoice'}</Text></TouchableOpacity>
-    <Text style={styles.section}>Coming next</Text>
-    {['AI invoice extraction & review','My products & original invoices','Warranty expiry reminders','Verified customer care contacts','Ask AI about your purchases'].map(t => <View key={t} style={styles.item}><Text style={styles.itemText}>•  {t}</Text></View>)}
+  async function confirm() {
+    setBusy(true);
+    try {
+      await request('/invoices/' + invoiceId + '/confirm', { method:'POST', headers:{'Content-Type':'application/json'},body:JSON.stringify(draft) });
+      setDraft(null);setTab('products');await refresh();
+      Alert.alert('Saved','Invoice and products saved.');
+    } catch(e) { Alert.alert('Unable to save',String(e)); } finally { setBusy(false); }
+  }
+  const field = (label:string,value:string,onChange:(s:string)=>void) => <View style={{marginBottom:12}}><Text style={styles.label}>{label}</Text><TextInput style={styles.input} value={value || ''} onChangeText={onChange} placeholder={label} autoCapitalize="none" /></View>;
+  const button = (label:string,onPress:()=>void) => <TouchableOpacity disabled={busy} style={styles.button} onPress={onPress}><Text style={styles.buttonText}>{label}</Text></TouchableOpacity>;
+  if (!token) return <SafeAreaView style={styles.root}><ScrollView contentContainerStyle={styles.body}><StatusBar style="dark"/><Text style={styles.title}>Invoice Vault</Text><Text style={styles.subtitle}>Your purchases and warranties in one place.</Text>{field('Email',email,setEmail)}{field('Password (10+ characters)',password,setPassword)}{button('Sign in',()=>auth('login'))}{button('Create account',()=>auth('register'))}</ScrollView></SafeAreaView>;
+  return <SafeAreaView style={styles.root}><ScrollView contentContainerStyle={styles.body}><StatusBar style="dark"/><Text style={styles.title}>Invoice Vault</Text><Text style={styles.subtitle}>{products.length} products · {expiring.length} warranties expiring within 30 days</Text>
+    <View style={styles.tabs}>{['products','invoices','review'].filter(x=>x!=='review'||draft).map(t=><TouchableOpacity key={t} onPress={()=>setTab(t)} style={[styles.tab,tab===t&&styles.selected]}><Text style={{color:tab===t?'white':'#223'}}>{t.toUpperCase()}</Text></TouchableOpacity>)}</View>
+    {tab==='products' && <>{button('+ Upload invoice',upload)}{button('Refresh',refresh)}{products.map(p=><View key={p.id} style={styles.card}><Text style={styles.heading}>{p.name}</Text><Text>{[p.brand,p.model].filter(Boolean).join(' · ')}</Text>{p.items.map((it:any)=><Text key={it.id} style={styles.note}>Warranty: {it.warranty?.expiresAt ? new Date(it.warranty.expiresAt).toLocaleDateString() : 'Not recorded'}</Text>)}{p.support.map((s:any)=><Text key={s.id} onPress={()=>s.phone&&Linking.openURL('tel:'+s.phone)} style={styles.link}>{s.name}: {s.phone || s.website || s.email}</Text>)}</View>)}</>}
+    {tab==='invoices' && invoices.map(i=><View key={i.id} style={styles.card}><Text style={styles.heading}>{i.seller || 'Invoice'} {i.invoiceNumber || ''}</Text><Text>{i.status} · {i.items.length} items</Text><Text style={styles.note}>Original file stored securely on the API server</Text></View>)}
+    {tab==='review' && draft && <><Text style={styles.heading}>Review invoice details</Text>{field('Invoice number',draft.invoiceNumber,(v)=>setDraft({...draft,invoiceNumber:v}))}{field('Seller',draft.seller,(v)=>setDraft({...draft,seller:v}))}{field('Purchase date (YYYY-MM-DD)',draft.purchaseDate,(v)=>setDraft({...draft,purchaseDate:v}))}{draft.items.map((it:Item,index:number)=><View key={index} style={styles.card}><Text style={styles.heading}>Product {index+1}</Text>{field('Product name',it.name,(v)=>changeItem(index,'name',v))}{field('Brand',it.brand||'',(v)=>changeItem(index,'brand',v))}{field('Warranty expiry YYYY-MM-DD',it.warrantyEndDate||'',(v)=>changeItem(index,'warrantyEndDate',v))}</View>)}{button('Add another product',()=>setDraft({...draft,items:[...draft.items,{name:''}]}))}{button('Confirm and save',confirm)}</>}
+    <TouchableOpacity onPress={()=>{setToken('');setProducts([]);setInvoices([]);}}><Text style={styles.link}>Sign out</Text></TouchableOpacity>
   </ScrollView></SafeAreaView>;
+  function changeItem(index:number,key:string,value:string) { setDraft((previous:any)=>({...previous,items:previous.items.map((item:any,i:number)=>i===index?{...item,[key]:value}:item)})); }
 }
-const styles = StyleSheet.create({
-  root:{flex:1,backgroundColor:'#f7f9fc'},body:{padding:24,gap:16},
-  title:{fontSize:30,fontWeight:'800',color:'#17243c',marginTop:24},
-  subtitle:{fontSize:15,color:'#627087',lineHeight:22},
-  panel:{backgroundColor:'#e9f1ff',borderRadius:18,padding:22,marginTop:12},
-  heading:{fontSize:19,fontWeight:'700',color:'#17243c'},note:{marginTop:8,color:'#536780',lineHeight:21},
-  button:{backgroundColor:'#2659d9',padding:18,borderRadius:14,alignItems:'center'},
-  buttonText:{color:'#fff',fontWeight:'700',fontSize:16},
-  section:{fontSize:20,fontWeight:'700',marginTop:18,color:'#17243c'},
-  item:{backgroundColor:'#fff',borderRadius:12,padding:17},itemText:{fontSize:15,color:'#263955'}
+const styles=StyleSheet.create({
+  root:{flex:1,backgroundColor:'#f7f9fc'},body:{padding:24,gap:16},title:{fontSize:30,fontWeight:'800',color:'#17243c',marginTop:24},
+  subtitle:{fontSize:15,color:'#627087',lineHeight:22},label:{fontSize:13,color:'#627087',marginBottom:5},
+  input:{backgroundColor:'white',borderColor:'#dce3ee',borderWidth:1,padding:12,borderRadius:10,color:'#17243c'},
+  button:{backgroundColor:'#2659d9',padding:16,borderRadius:14,alignItems:'center'},
+  buttonText:{color:'white',fontWeight:'700',fontSize:15},heading:{fontSize:18,fontWeight:'700',color:'#17243c'},
+  card:{backgroundColor:'white',padding:16,borderRadius:14,gap:8},note:{color:'#627087'},link:{color:'#2659d9',marginTop:8},
+  tabs:{flexDirection:'row',gap:8},tab:{padding:10,borderRadius:10,backgroundColor:'#e6eaf1'},selected:{backgroundColor:'#2659d9'}
 });
