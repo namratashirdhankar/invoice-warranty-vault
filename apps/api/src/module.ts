@@ -98,7 +98,6 @@ class ApiController {
       const previous = await tx.invoiceItem.findMany({ where: { invoiceId: id }, select: { id:true,productId:true } });
       await tx.warranty.deleteMany({ where: { itemId: { in: previous.map(x=>x.id) } } });
       await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
-      await tx.product.deleteMany({ where: { id: { in: previous.map(x=>x.productId) }, items: { none: {} } } });
       const invoice = await tx.invoice.update({ where: { id }, data: {
         invoiceNumber: body.invoiceNumber || null, seller: body.seller || null, purchaseDate: date(body.purchaseDate),
         currency: body.currency || 'INR', total: body.total == null ? null : new Prisma.Decimal(body.total), status: 'CONFIRMED'
