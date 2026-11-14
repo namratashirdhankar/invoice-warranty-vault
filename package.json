@@ -1,0 +1,13 @@
+{
+  "name": "invoice-warranty-vault",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run start:dev -w @vault/api",
+    "dev:mobile": "npm run start -w @vault/mobile",
+    "db:generate": "npm run prisma:generate -w @vault/api",
+    "db:push": "npm run prisma:push -w @vault/api"
+  }
+}
