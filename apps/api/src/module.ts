@@ -123,7 +123,9 @@ class ApiController {
   @Post('notifications/token')
   async registerPush(@CurrentUser() userId: string, @Body() body: { token: string }) {
     if (!body?.token || !/^ExponentPushToken\\[[^\\]]+\\]$/.test(body.token)) throw new BadRequestException('Valid Expo push token required');
-    return this.db.pushToken.upsert({ where: { token: body.token }, create: { token: body.token, userId }, update: { userId } });
+    const existing = await this.db.pushToken.findUnique({ where: { token: body.token } });
+    if (existing && existing.userId !== userId) throw new ConflictException('Device token is registered to another account');
+    return existing || this.db.pushToken.create({ data: { token: body.token, userId } });
   }
   @UseGuards(AuthGuard)
   @Delete('notifications/token')
