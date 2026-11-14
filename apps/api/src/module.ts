@@ -9,6 +9,8 @@ import { resolve, extname } from 'path';
 import { hash, compare } from 'bcryptjs';
 import { AuthGuard, CurrentUser, tokenFor } from './security';
 import { ExtractionService } from './extraction';
+import { AssistantService } from './assistant';
+import { ReminderService } from './reminders';
 
 const UPLOAD_DIR = resolve(process.env.UPLOAD_DIR || './uploads');
 const fileOptions = {
@@ -23,7 +25,7 @@ const fileOptions = {
 class Db extends PrismaClient implements OnModuleDestroy { async onModuleDestroy() { await this.$disconnect(); } }
 @Controller()
 class ApiController {
-  constructor(private readonly db: Db, private readonly extraction: ExtractionService) {}
+  constructor(private readonly db: Db, private readonly extraction: ExtractionService, private readonly assistant: AssistantService) {}
   @Get('health') health() { return { status: 'ok' }; }
 
   @Post('auth/register')
@@ -113,11 +115,27 @@ class ApiController {
     return this.db.supportContact.create({ data: { productId: id, name: body.name, phone: body.phone || null, email: body.email || null, website: body.website || null, sourceUrl: body.sourceUrl || null, verifiedAt: null } });
   }
   @UseGuards(AuthGuard)
+  @Post('assistant/ask')
+  ask(@CurrentUser() userId: string, @Body() body: { question: string }) {
+    return this.assistant.answer(userId, body?.question);
+  }
+  @UseGuards(AuthGuard)
+  @Post('notifications/token')
+  async registerPush(@CurrentUser() userId: string, @Body() body: { token: string }) {
+    if (!body?.token || !/^ExponentPushToken\\[[^\\]]+\\]$/.test(body.token)) throw new BadRequestException('Valid Expo push token required');
+    return this.db.pushToken.upsert({ where: { token: body.token }, create: { token: body.token, userId }, update: { userId } });
+  }
+  @UseGuards(AuthGuard)
+  @Delete('notifications/token')
+  async unregisterPush(@CurrentUser() userId: string, @Body() body: { token: string }) {
+    return this.db.pushToken.deleteMany({ where: { userId, token: body?.token || '' } });
+  }
+  @UseGuards(AuthGuard)
   @Get('warranties/expiring')
   expiring(@CurrentUser() userId: string, @Query('days') days = '30') {
     const count = Math.min(365, Math.max(1, Number(days) || 30));
     return this.db.warranty.findMany({ where: { expiresAt: { gte: new Date(), lte: new Date(Date.now() + count * 86400000) }, item: { invoice: { userId } } }, include: { item: { include: { product: true, invoice: true } } } });
   }
 }
-@Module({ controllers: [ApiController], providers: [Db, ExtractionService, AuthGuard] })
+@Module({ controllers: [ApiController], providers: [Db, ExtractionService, AssistantService, ReminderService, AuthGuard] })
 export class AppModule {}
