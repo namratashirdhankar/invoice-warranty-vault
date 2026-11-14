@@ -1,10 +1,10 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 
 @Injectable()
 export class ReminderService implements OnModuleInit, OnModuleDestroy {
   private interval?: ReturnType<typeof setInterval>;
-  constructor(private readonly db: PrismaClient) {}
+  constructor(@Inject('DATABASE') private readonly db: PrismaClient) {}
   onModuleInit() {
     if (process.env.ENABLE_REMINDERS !== 'true') return;
     this.run().catch(console.error);
