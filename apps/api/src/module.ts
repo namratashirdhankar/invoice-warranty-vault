@@ -9,6 +9,7 @@ import { resolve, extname } from 'path';
 import { hash, compare } from 'bcryptjs';
 import { AuthGuard, CurrentUser, tokenFor } from './security';
 import { ExtractionService } from './extraction';
+import { InvoiceStorage } from './storage';
 import { AssistantService } from './assistant';
 import { ReminderService } from './reminders';
 
@@ -25,7 +26,7 @@ const fileOptions = {
 class Db extends PrismaClient implements OnModuleDestroy { async onModuleDestroy() { await this.$disconnect(); } }
 @Controller()
 class ApiController {
-  constructor(private readonly db: Db, private readonly extraction: ExtractionService, private readonly assistant: AssistantService) {}
+  constructor(private readonly db: Db, private readonly extraction: ExtractionService, private readonly assistant: AssistantService, private readonly storage: InvoiceStorage) {}
   @Get('health') health() { return { status: 'ok' }; }
 
   @Post('auth/register')
@@ -52,7 +53,7 @@ class ApiController {
   @UseInterceptors(FileInterceptor('file', fileOptions))
   async upload(@CurrentUser() userId: string, @UploadedFile() file?: Express.Multer.File) {
     if (!file) throw new BadRequestException('PDF, JPEG or PNG required (max 10MB)');
-    const invoice = await this.db.invoice.create({ data: { userId, fileKey: file.filename, mimeType: file.mimetype } });
+    const invoice = await this.db.invoice.create({ data: { userId, fileKey: await this.storage.store(userId,file), mimeType: file.mimetype } });
     return { id: invoice.id, status: invoice.status };
   }
 
@@ -65,14 +66,18 @@ class ApiController {
   @Post('invoices/:id/extract')
   async extract(@CurrentUser() userId: string, @Param('id') id: string) {
     const invoice = await this.ownedInvoice(userId, id);
-    return { invoiceId: id, preview: await this.extraction.extract(resolve(UPLOAD_DIR, invoice.fileKey), invoice.mimeType), requiresReview: true };
+    const file = await this.storage.readForExtraction(invoice.fileKey);
+    return { invoiceId: id, preview: await this.extraction.extract(file.bytes, invoice.mimeType), requiresReview: true };
   }
   @UseGuards(AuthGuard)
   @Get('invoices/:id/file')
   async download(@CurrentUser() userId: string, @Param('id') id: string, @Res() res: any) {
     const invoice = await this.ownedInvoice(userId, id);
+    const url = await this.storage.downloadUrl(invoice.fileKey);
+    if (url) return res.redirect(url);
+    const local = await this.storage.downloadLocal(invoice.fileKey);
     res.type(invoice.mimeType);
-    return res.sendFile(invoice.fileKey, { root: UPLOAD_DIR });
+    return res.sendFile(local.filename, { root: local.root });
   }
   @UseGuards(AuthGuard)
   @Post('invoices/:id/confirm')
@@ -139,5 +144,5 @@ class ApiController {
     return this.db.warranty.findMany({ where: { expiresAt: { gte: new Date(), lte: new Date(Date.now() + count * 86400000) }, item: { invoice: { userId } } }, include: { item: { include: { product: true, invoice: true } } } });
   }
 }
-@Module({ controllers: [ApiController], providers: [Db, { provide: 'DATABASE', useExisting: Db }, ExtractionService, AssistantService, ReminderService, AuthGuard] })
+@Module({ controllers: [ApiController], providers: [Db, { provide: 'DATABASE', useExisting: Db }, InvoiceStorage, ExtractionService, AssistantService, ReminderService, AuthGuard] })
 export class AppModule {}
