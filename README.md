@@ -51,3 +51,14 @@ Before hosting or using real personal invoices, add durable encrypted object sto
 - Reminder delivery is best-effort; a successful Expo ticket is not proof the device received the message. Add receipt processing, retry/backoff, and proper job locking for production.
 - The mobile app does not yet persist sign-in across restarts or expose a native PDF viewer.
 - The source has not been built or run on physical devices in this environment. Validate dependencies, run Prisma migrations, and execute end-to-end tests before real use.
+
+## Secure storage and mobile sign-in (new)
+- When `S3_BUCKET` is configured, invoice uploads are stored in private S3 objects under a user-specific prefix with SSE-S3 encryption. Use an IAM role scoped to the configured bucket; never ship AWS credentials in the mobile app. Without `S3_BUCKET`, local files remain a **development-only** fallback.
+- `GET /invoices/:id/download-link` returns a 60-second presigned S3 download URL after authenticating and checking invoice ownership. The mobile invoice viewer uses this endpoint; it requires S3 configuration. Signed URLs can be forwarded, so treat them as secrets.
+- `GET /invoices/:id/file` remains an authenticated download endpoint (redirects to S3 when configured).
+- Mobile login tokens are persisted using Expo SecureStore; signing out clears the local token. Server-side token revocation and refresh remain pending.
+- GitHub Actions now runs Prisma client generation, API build, and mobile TypeScript checks. Check the workflow result in GitHub; no successful run is claimed here.
+- For Expo push, add the `expo-notifications` and `expo-secure-store` native plugins and configure EAS credentials before testing on a physical device.
+
+## Release blockers
+Do not launch publicly until the CI checks pass and you have tested: uploads, authenticated downloads, data isolation, duplicate confirmations, notification delivery, device registration, account deletion, storage lifecycle, and recovery. Also add antivirus scanning, file signature verification, rate limiting, a proper password reset flow, and privacy policy. Gmail import, official customer-care lookup, subscriptions, iOS release and store submission are still pending.
