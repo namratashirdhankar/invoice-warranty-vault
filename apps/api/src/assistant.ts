@@ -1,9 +1,9 @@
-import { Injectable, BadRequestException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, Inject, BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 
 @Injectable()
 export class AssistantService {
-  constructor(private readonly db: PrismaClient) {}
+  constructor(@Inject('DATABASE') private readonly db: PrismaClient) {}
   async answer(userId: string, question: string) {
     if (!question || question.length > 1000) throw new BadRequestException('Question must be 1–1000 characters');
     const products = await this.db.product.findMany({
