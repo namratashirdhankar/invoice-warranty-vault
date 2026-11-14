@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "Invoice Vault",
+    "slug": "invoice-warranty-vault",
+    "scheme": "invoicevault",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.invoicevault.mobile"
+    },
+    "android": {
+      "package": "com.invoicevault.mobile"
+    }
+  }
+}
