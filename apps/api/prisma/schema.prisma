@@ -11,6 +11,7 @@ model User {
   passwordHash String
   invoices  Invoice[]
   products  Product[]
+  pushTokens PushToken[]
   createdAt DateTime  @default(now())
 }
 model Invoice {
@@ -74,4 +75,17 @@ model SupportContact {
   website     String?
   sourceUrl   String?
   verifiedAt  DateTime?
+}
+
+model PushToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  createdAt DateTime @default(now())
+  @@index([userId])
+}
+model ReminderDelivery {
+  key       String   @id
+  createdAt DateTime @default(now())
 }
