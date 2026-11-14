@@ -137,5 +137,5 @@ class ApiController {
     return this.db.warranty.findMany({ where: { expiresAt: { gte: new Date(), lte: new Date(Date.now() + count * 86400000) }, item: { invoice: { userId } } }, include: { item: { include: { product: true, invoice: true } } } });
   }
 }
-@Module({ controllers: [ApiController], providers: [Db, ExtractionService, AssistantService, ReminderService, AuthGuard] })
+@Module({ controllers: [ApiController], providers: [Db, { provide: 'DATABASE', useExisting: Db }, ExtractionService, AssistantService, ReminderService, AuthGuard] })
 export class AppModule {}
