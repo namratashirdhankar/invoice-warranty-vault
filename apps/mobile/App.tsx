@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { SafeAreaView, View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Alert, Linking } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
+import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
 import { StatusBar } from 'expo-status-bar';
 
 const API = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:3000';
@@ -16,6 +18,8 @@ export default function App() {
   const [draft, setDraft] = useState<any>(null);
   const [invoiceId, setInvoiceId] = useState('');
   const [busy, setBusy] = useState(false);
+  const [question,setQuestion] = useState('');
+  const [answer,setAnswer] = useState('');
   async function request(path: string, options: RequestInit = {}) {
     const response = await fetch(API + path, { ...options, headers: { Authorization: 'Bearer ' + token, ...(options.headers || {}) } });
     const result = await response.json();
@@ -59,6 +63,25 @@ export default function App() {
       }
     } catch(e) { Alert.alert('Upload failed',String(e)); } finally { setBusy(false); }
   }
+  async function askAssistant() {
+    if (!question.trim()) return;
+    setBusy(true);
+    try {
+      const response = await request('/assistant/ask', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({question}) });
+      setAnswer(response.answer);
+    } catch(e) { Alert.alert('Assistant error',String(e)); } finally { setBusy(false); }
+  }
+  async function enableReminders() {
+    try {
+      const permission = await Notifications.requestPermissionsAsync();
+      if (permission.status !== 'granted') { Alert.alert('Notifications disabled','Enable notifications in your phone settings.'); return; }
+      const projectId = Constants.expoConfig?.extra?.eas?.projectId;
+      if (!projectId) { Alert.alert('Expo setup needed','Configure the EAS project ID in app.json to enable device push notifications.'); return; }
+      const push = await Notifications.getExpoPushTokenAsync({ projectId });
+      await request('/notifications/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:push.data})});
+      Alert.alert('Reminders enabled','Your device is registered for warranty reminders.');
+    } catch(e) { Alert.alert('Unable to enable reminders',String(e)); }
+  }
   async function confirm() {
     setBusy(true);
     try {
@@ -71,8 +94,9 @@ export default function App() {
   const button = (label:string,onPress:()=>void) => <TouchableOpacity disabled={busy} style={styles.button} onPress={onPress}><Text style={styles.buttonText}>{label}</Text></TouchableOpacity>;
   if (!token) return <SafeAreaView style={styles.root}><ScrollView contentContainerStyle={styles.body}><StatusBar style="dark"/><Text style={styles.title}>Invoice Vault</Text><Text style={styles.subtitle}>Your purchases and warranties in one place.</Text>{field('Email',email,setEmail)}{field('Password (10+ characters)',password,setPassword)}{button('Sign in',()=>auth('login'))}{button('Create account',()=>auth('register'))}</ScrollView></SafeAreaView>;
   return <SafeAreaView style={styles.root}><ScrollView contentContainerStyle={styles.body}><StatusBar style="dark"/><Text style={styles.title}>Invoice Vault</Text><Text style={styles.subtitle}>{products.length} products · {expiring.length} warranties expiring within 30 days</Text>
-    <View style={styles.tabs}>{['products','invoices','review'].filter(x=>x!=='review'||draft).map(t=><TouchableOpacity key={t} onPress={()=>setTab(t)} style={[styles.tab,tab===t&&styles.selected]}><Text style={{color:tab===t?'white':'#223'}}>{t.toUpperCase()}</Text></TouchableOpacity>)}</View>
-    {tab==='products' && <>{button('+ Upload invoice',upload)}{button('Refresh',refresh)}{products.map(p=><View key={p.id} style={styles.card}><Text style={styles.heading}>{p.name}</Text><Text>{[p.brand,p.model].filter(Boolean).join(' · ')}</Text>{p.items.map((it:any)=><Text key={it.id} style={styles.note}>Warranty: {it.warranty?.expiresAt ? new Date(it.warranty.expiresAt).toLocaleDateString() : 'Not recorded'}</Text>)}{p.support.map((s:any)=><Text key={s.id} onPress={()=>s.phone&&Linking.openURL('tel:'+s.phone)} style={styles.link}>{s.name}: {s.phone || s.website || s.email}</Text>)}</View>)}</>}
+    <View style={styles.tabs}>{['products','invoices','assistant','review'].filter(x=>x!=='review'||draft).map(t=><TouchableOpacity key={t} onPress={()=>setTab(t)} style={[styles.tab,tab===t&&styles.selected]}><Text style={{color:tab===t?'white':'#223'}}>{t.toUpperCase()}</Text></TouchableOpacity>)}</View>
+    {tab==='products' && <>{button('+ Upload invoice',upload)}{button('Refresh',refresh)}{button('Enable warranty reminders',enableReminders)}{products.map(p=><View key={p.id} style={styles.card}><Text style={styles.heading}>{p.name}</Text><Text>{[p.brand,p.model].filter(Boolean).join(' · ')}</Text>{p.items.map((it:any)=><Text key={it.id} style={styles.note}>Warranty: {it.warranty?.expiresAt ? new Date(it.warranty.expiresAt).toLocaleDateString() : 'Not recorded'}</Text>)}{p.support.map((s:any)=><Text key={s.id} onPress={()=>s.phone&&Linking.openURL('tel:'+s.phone)} style={styles.link}>{s.name}: {s.phone || s.website || s.email}</Text>)}</View>)}</>}
+    {tab==='assistant' && <View style={styles.card}><Text style={styles.heading}>Ask about your purchases</Text>{field('Your question',question,setQuestion)}{button('Ask AI',askAssistant)}{!!answer && <Text style={styles.note}>{answer}</Text>}</View>}
     {tab==='invoices' && invoices.map(i=><View key={i.id} style={styles.card}><Text style={styles.heading}>{i.seller || 'Invoice'} {i.invoiceNumber || ''}</Text><Text>{i.status} · {i.items.length} items</Text><Text style={styles.note}>Original file stored securely on the API server</Text></View>)}
     {tab==='review' && draft && <><Text style={styles.heading}>Review invoice details</Text>{field('Invoice number',draft.invoiceNumber,(v)=>setDraft({...draft,invoiceNumber:v}))}{field('Seller',draft.seller,(v)=>setDraft({...draft,seller:v}))}{field('Purchase date (YYYY-MM-DD)',draft.purchaseDate,(v)=>setDraft({...draft,purchaseDate:v}))}{draft.items.map((it:Item,index:number)=><View key={index} style={styles.card}><Text style={styles.heading}>Product {index+1}</Text>{field('Product name',it.name,(v)=>changeItem(index,'name',v))}{field('Brand',it.brand||'',(v)=>changeItem(index,'brand',v))}{field('Warranty expiry YYYY-MM-DD',it.warrantyEndDate||'',(v)=>changeItem(index,'warrantyEndDate',v))}</View>)}{button('Add another product',()=>setDraft({...draft,items:[...draft.items,{name:''}]}))}{button('Confirm and save',confirm)}</>}
     <TouchableOpacity onPress={()=>{setToken('');setProducts([]);setInvoices([]);}}><Text style={styles.link}>Sign out</Text></TouchableOpacity>
