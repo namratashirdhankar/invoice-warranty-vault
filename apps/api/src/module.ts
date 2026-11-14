@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Module, Controller, Get, Post, Patch, Delete, Param, Query, Body, Req, Res, UploadedFile, UseInterceptors, UseGuards, BadRequestException, NotFoundException, Injectable, OnModuleDestroy, ConflictException, UnauthorizedException } from '@nestjs/common';
+import { Module, Controller, Get, Post, Patch, Delete, Param, Query, Body, Req, Res, UploadedFile, UseInterceptors, UseGuards, BadRequestException, ServiceUnavailableException, NotFoundException, Injectable, OnModuleDestroy, ConflictException, UnauthorizedException } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { diskStorage } from 'multer';
@@ -70,6 +70,14 @@ class ApiController {
     return { invoiceId: id, preview: await this.extraction.extract(file.bytes, invoice.mimeType), requiresReview: true };
   }
   @UseGuards(AuthGuard)
+  @Get('invoices/:id/download-link')
+  async downloadLink(@CurrentUser() userId: string, @Param('id') id: string) {
+    const invoice = await this.ownedInvoice(userId,id);
+    const url = await this.storage.downloadUrl(invoice.fileKey);
+    if (!url) throw new ServiceUnavailableException('Set S3_BUCKET to enable mobile invoice viewing');
+    return { url, expiresInSeconds:60 };
+  }
+  @UseGuards(AuthGuard)
   @Get('invoices/:id/file')
   async download(@CurrentUser() userId: string, @Param('id') id: string, @Res() res: any) {
     const invoice = await this.ownedInvoice(userId, id);
@@ -87,7 +95,10 @@ class ApiController {
     if (body.items.some((item: any) => typeof item.name !== 'string' || !item.name.trim())) throw new BadRequestException('Each product needs a name');
     const date = (v: any) => v && !Number.isNaN(new Date(v).getTime()) ? new Date(v) : null;
     return this.db.$transaction(async tx => {
+      const previous = await tx.invoiceItem.findMany({ where: { invoiceId: id }, select: { id:true,productId:true } });
+      await tx.warranty.deleteMany({ where: { itemId: { in: previous.map(x=>x.id) } } });
       await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
+      await tx.product.deleteMany({ where: { id: { in: previous.map(x=>x.productId) }, items: { none: {} } } });
       const invoice = await tx.invoice.update({ where: { id }, data: {
         invoiceNumber: body.invoiceNumber || null, seller: body.seller || null, purchaseDate: date(body.purchaseDate),
         currency: body.currency || 'INR', total: body.total == null ? null : new Prisma.Decimal(body.total), status: 'CONFIRMED'
