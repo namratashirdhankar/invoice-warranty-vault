@@ -1,18 +1,25 @@
 import 'reflect-metadata';
-import { Module, Controller, Get, Post, Patch, Delete, Param, Query, Body, Req, Res, UploadedFile, UseInterceptors, UseGuards, BadRequestException, ServiceUnavailableException, NotFoundException, Injectable, OnModuleDestroy, ConflictException, UnauthorizedException } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { Module, Controller, Get, Post, Patch, Delete, Param, Query, Body, Req, Res, UploadedFile, UploadedFiles, UseInterceptors, UseGuards, BadRequestException, ServiceUnavailableException, NotFoundException, Injectable, OnModuleDestroy, ConflictException, UnauthorizedException } from '@nestjs/common';
+import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { PrismaClient, Prisma } from '@prisma/client';
-import { diskStorage } from 'multer';
+import { diskStorage, memoryStorage } from 'multer';
 import { randomUUID } from 'crypto';
 import { mkdirSync } from 'fs';
 import { resolve, extname } from 'path';
 import { hash, compare } from 'bcryptjs';
 import { AuthGuard, CurrentUser, tokenFor } from './security';
+import { OAuth2Client } from 'google-auth-library';
 import { ExtractionService } from './extraction';
 import { InvoiceStorage } from './storage';
 import { AssistantService } from './assistant';
 import { ReminderService } from './reminders';
 
+const chatPhotoOptions = {
+  limits: { fileSize: 4 * 1024 * 1024, files: 5 },
+  fileFilter: (_req: any, file: Express.Multer.File, cb: any) => cb(['image/jpeg','image/png','image/webp'].includes(file.mimetype) ? null : new BadRequestException('Only JPEG, PNG, or WebP photos are accepted'), ['image/jpeg','image/png','image/webp'].includes(file.mimetype)),
+  storage: memoryStorage(),
+};
+const googleOAuthClient = new OAuth2Client();
 const UPLOAD_DIR = resolve(process.env.UPLOAD_DIR || './uploads');
 const fileOptions = {
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -44,9 +51,44 @@ class ApiController {
     return { token: tokenFor(user.id), email: user.email };
   }
 
+  @Post('auth/google')
+  async googleLogin(@Body() body: { idToken?: string }) {
+    const audiences = (process.env.GOOGLE_CLIENT_IDS || '').split(',').map(value => value.trim()).filter(Boolean);
+    if (!audiences.length) throw new ServiceUnavailableException('Google sign-in is not configured on the API');
+    if (typeof body?.idToken !== 'string' || body.idToken.length < 100 || body.idToken.length > 12000) throw new BadRequestException('A valid Google ID token is required');
+    let payload;
+    try { payload = (await googleOAuthClient.verifyIdToken({ idToken: body.idToken, audience: audiences })).getPayload(); }
+    catch { throw new UnauthorizedException('Google sign-in token could not be verified'); }
+    const email = payload?.email?.trim().toLowerCase();
+    if (!email || payload?.email_verified !== true) throw new UnauthorizedException('Google account must have a verified email address');
+    let user = await this.db.user.findUnique({ where: { email } });
+    if (!user) user = await this.db.user.create({ data: { email, passwordHash: await hash(randomUUID(), 12) } });
+    return { token: tokenFor(user.id), email: user.email };
+  }
+
   @UseGuards(AuthGuard)
   @Get('invoices')
   invoices(@CurrentUser() userId: string) { return this.db.invoice.findMany({ where: { userId }, include: { items: { include: { product: true, warranty: true } } }, orderBy: { createdAt: 'desc' }, take: 200 }); }
+
+  @UseGuards(AuthGuard)
+  @Delete('invoices/:id')
+  async deleteInvoice(@CurrentUser() userId: string, @Param('id') id: string) {
+    const invoice = await this.ownedInvoice(userId, id);
+    const lines = await this.db.invoiceItem.findMany({ where: { invoiceId: id }, select: { id: true, productId: true } });
+    await this.db.$transaction(async tx => {
+      await tx.warranty.deleteMany({ where: { itemId: { in: lines.map(line => line.id) } } });
+      await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
+      await tx.invoice.delete({ where: { id } });
+      for (const productId of new Set(lines.map(line => line.productId))) {
+        if (await tx.invoiceItem.count({ where: { productId } }) === 0) {
+          await tx.supportContact.deleteMany({ where: { productId } });
+          await tx.product.deleteMany({ where: { id: productId, userId } });
+        }
+      }
+    });
+    await this.storage.remove(invoice.fileKey);
+    return { deleted: true };
+  }
 
   @UseGuards(AuthGuard)
   @Post('invoices/upload')
@@ -90,10 +132,19 @@ class ApiController {
   @UseGuards(AuthGuard)
   @Post('invoices/:id/confirm')
   async confirm(@CurrentUser() userId: string, @Param('id') id: string, @Body() body: any) {
-    await this.ownedInvoice(userId, id);
+    const currentInvoice = await this.ownedInvoice(userId, id);
     if (!Array.isArray(body?.items) || body.items.length < 1 || body.items.length > 100) throw new BadRequestException('At least one product required');
     if (body.items.some((item: any) => typeof item.name !== 'string' || !item.name.trim())) throw new BadRequestException('Each product needs a name');
     const date = (v: any) => v && !Number.isNaN(new Date(v).getTime()) ? new Date(v) : null;
+    const normalize = (value: unknown) => String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/[\\s\\p{P}\\p{S}]+/gu, '');
+    const invoiceNumber = normalize(body.invoiceNumber);
+    if (invoiceNumber) {
+      const seller = normalize(body.seller);
+      const candidates = await this.db.invoice.findMany({ where: { userId, status: 'CONFIRMED', invoiceNumber: { not: null }, id: { not: id } }, select: { id: true, invoiceNumber: true, seller: true } });
+      if (candidates.some(existing => normalize(existing.invoiceNumber) === invoiceNumber && normalize(existing.seller) === seller)) {
+        throw new ConflictException('An invoice with this invoice number and seller is already saved. Check your invoices before continuing.');
+      }
+    }
     return this.db.$transaction(async tx => {
       const previous = await tx.invoiceItem.findMany({ where: { invoiceId: id }, select: { id:true,productId:true } });
       await tx.warranty.deleteMany({ where: { itemId: { in: previous.map(x=>x.id) } } });
@@ -130,9 +181,21 @@ class ApiController {
     return this.db.supportContact.create({ data: { productId: id, name: body.name, phone: body.phone || null, email: body.email || null, website: body.website || null, sourceUrl: body.sourceUrl || null, verifiedAt: null } });
   }
   @UseGuards(AuthGuard)
+  @Post('assistant/chat')
+  @UseInterceptors(FilesInterceptor('photos', 5, chatPhotoOptions))
+  chat(@CurrentUser() userId: string, @Body() body: { message?: string; productId?: string; history?: string }, @UploadedFiles() photos: Express.Multer.File[]) {
+    return this.assistant.chat(userId, body, photos || []);
+  }
+
+  @UseGuards(AuthGuard)
   @Post('assistant/ask')
   ask(@CurrentUser() userId: string, @Body() body: { question: string }) {
     return this.assistant.answer(userId, body?.question);
+  }
+  @UseGuards(AuthGuard)
+  @Post('assistant/warranty-claim-draft')
+  warrantyClaimDraft(@CurrentUser() userId: string, @Body() body: { productId: string; issue: string; noticedOn?: string; stepsTried?: string }) {
+    return this.assistant.createWarrantyClaimDraft(userId, body);
   }
   @UseGuards(AuthGuard)
   @Post('notifications/token')
