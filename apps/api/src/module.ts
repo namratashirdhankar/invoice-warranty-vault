@@ -99,6 +99,28 @@ class ApiController {
     return { id: invoice.id, status: invoice.status };
   }
 
+  private async optimizeStoredInvoice(invoice: { id: string; fileKey: string; mimeType: string }) {
+    let optimized: Awaited<ReturnType<InvoiceStorage['optimize']>> = null;
+    try {
+      optimized = await this.storage.optimize(invoice.fileKey, invoice.mimeType);
+      if (!optimized) return null;
+      // Compare-and-swap prevents concurrent requests replacing the same file twice.
+      const changed = await this.db.invoice.updateMany({
+        where: { id: invoice.id, fileKey: invoice.fileKey },
+        data: { fileKey: optimized.fileKey, mimeType: optimized.mimeType }
+      });
+      if (!changed.count) {
+        await this.storage.remove(optimized.fileKey);
+        return null;
+      }
+    } catch {
+      if (optimized) await this.storage.remove(optimized.fileKey).catch(() => {});
+      return null;
+    }
+    await this.storage.remove(invoice.fileKey).catch(() => {});
+    return { originalBytes: optimized.originalBytes, storedBytes: optimized.storedBytes, savedBytes: optimized.originalBytes - optimized.storedBytes };
+  }
+
   private async ownedInvoice(userId: string, id: string) {
     const invoice = await this.db.invoice.findFirst({ where: { id, userId } });
     if (!invoice) throw new NotFoundException('Invoice not found');
@@ -109,7 +131,10 @@ class ApiController {
   async extract(@CurrentUser() userId: string, @Param('id') id: string) {
     const invoice = await this.ownedInvoice(userId, id);
     const file = await this.storage.readForExtraction(invoice.fileKey);
-    return { invoiceId: id, preview: await this.extraction.extract(file.bytes, invoice.mimeType), requiresReview: true };
+    // AI receives the original upload before storage is optimized.
+    const preview = await this.extraction.extract(file.bytes, invoice.mimeType);
+    const compression = await this.optimizeStoredInvoice(invoice);
+    return { invoiceId: id, preview, requiresReview: true, compression };
   }
   @UseGuards(AuthGuard)
   @Get('invoices/:id/download-link')
@@ -145,7 +170,7 @@ class ApiController {
         throw new ConflictException('An invoice with this invoice number and seller is already saved. Check your invoices before continuing.');
       }
     }
-    return this.db.$transaction(async tx => {
+    const confirmed = await this.db.$transaction(async tx => {
       const previous = await tx.invoiceItem.findMany({ where: { invoiceId: id }, select: { id:true,productId:true } });
       await tx.warranty.deleteMany({ where: { itemId: { in: previous.map(x=>x.id) } } });
       await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
@@ -168,6 +193,9 @@ class ApiController {
       }
       return invoice;
     });
+    // Manual entry also benefits from compression without requiring AI.
+    await this.optimizeStoredInvoice(confirmed);
+    return this.ownedInvoice(userId, id);
   }
   @UseGuards(AuthGuard)
   @Get('products')

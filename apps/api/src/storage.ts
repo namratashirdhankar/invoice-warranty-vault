@@ -1,5 +1,7 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
-import { readFile, unlink } from 'fs/promises';
+import { readFile, unlink, writeFile } from 'fs/promises';
+import { randomUUID } from 'crypto';
+import { compressInvoiceImage } from './invoice-compression';
 import { resolve } from 'path';
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -26,6 +28,25 @@ export class InvoiceStorage {
     }
   }
 
+  async optimize(key: string, mimeType: string) {
+    if (!['image/jpeg', 'image/png'].includes(mimeType)) return null;
+    const original = await this.readForExtraction(key);
+    const bytes = await compressInvoiceImage(original.bytes, mimeType);
+    if (!bytes) return null;
+    const filename = randomUUID() + '.webp';
+    const slash = key.lastIndexOf('/');
+    const fileKey = this.bucket ? key.slice(0, slash + 1) + filename : filename;
+    if (this.bucket) {
+      await this.s3.send(new PutObjectCommand({
+        Bucket: this.bucket, Key: fileKey, Body: bytes, ContentType: 'image/webp',
+        ServerSideEncryption: 'AES256'
+      }));
+    } else {
+      await writeFile(resolve(this.uploadDir, fileKey), bytes, { flag: 'wx' });
+    }
+    // The caller must persist the new key before deleting the original.
+    return { fileKey, mimeType: 'image/webp', originalBytes: original.bytes.length, storedBytes: bytes.length };
+  }
   async downloadUrl(key: string) {
     if (!this.bucket) return null;
     return getSignedUrl(this.s3, new GetObjectCommand({ Bucket: this.bucket, Key: key }), { expiresIn: 60 });

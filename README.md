@@ -12,7 +12,8 @@ A React Native (Expo) Android/iOS app backed by NestJS, PostgreSQL and Prisma.
 - Single AI warranty chat for product/issue descriptions and up to five photos; it searches official manufacturer warranty/support information, asks follow-up questions, cites sources, and helps draft a claim without submitting it
 - Local warranty-expiry alerts plus chat follow-up reminders; say “remind me to follow up in 3 days” or “remind me to call support on YYYY-MM-DD at HH:MM”, then confirm before scheduling
 - Mobile product list, invoice list, upload and extraction review screens
-- Authorized API endpoint to retrieve original invoice files
+- Authorized API endpoint to retrieve stored invoice files
+- Conservative image invoice compression after AI extraction or manual confirmation (PDFs unchanged)
 
 ## Setup
 1. Install Node 20+ and Docker.
@@ -25,6 +26,13 @@ A React Native (Expo) Android/iOS app backed by NestJS, PostgreSQL and Prisma.
 8. Copy `apps/mobile/.env.example` to `apps/mobile/.env` and set `API_URL` to the API server's address and port. For a physical phone, use an address reachable from the phone (not `localhost`); both devices should be on the same network.
 9. To enable Google login, create OAuth Web, Android, and iOS client IDs in Google Cloud Console. Use Android package `com.invoicevault.mobile` and iOS bundle ID `com.invoicevault.mobile`; set the three `EXPO_PUBLIC_GOOGLE_*_CLIENT_ID` values in `apps/mobile/.env` and put all allowed IDs, comma-separated, in API `GOOGLE_CLIENT_IDS`. Set up the OAuth consent screen and test-user access if the app is in Testing mode. Never put a client secret in the mobile app.
 10. In a separate terminal, run `npm run dev:mobile`. Restart Expo and reload the app after changing config. The API URL is embedded in the app and must not contain secrets. Use HTTPS outside local development. Google OAuth uses the `invoicevault` app scheme and needs a development build with matching Android SHA-1/iOS bundle settings; Expo Go cannot use this app's native Google client IDs.
+
+## Invoice image compression
+JPEG/PNG invoices are optimized after successful AI extraction (the first extraction reads the original upload), or after manual confirmation. Sharp auto-orients images, limits the longest edge to 3200 pixels without enlarging, and encodes WebP at quality 90. Only smaller results replace the original. PDFs, unsupported/multipage images, and decoder failures are left untouched.
+
+Local and S3 storage both save a new file first, update its database key and MIME type, then delete the old file. Failed database updates retain the original. The extraction response includes `compression` byte counts when optimization succeeds. Compression is lossy: inspect small text/QR codes on representative invoices before production. Existing invoices are optimized only when extracted or confirmed again; there is no bulk conversion.
+
+Run `npm run test:compression --workspace=@vault/api` for compression and safe-storage tests. Rebuild the mobile app for correct `.webp` sharing filenames.
 
 ## API
 `POST /auth/register`, `POST /auth/login`, and `POST /auth/google` return JWTs. Google sign-in requires a verified Google ID token whose audience is listed in `GOOGLE_CLIENT_IDS`.
