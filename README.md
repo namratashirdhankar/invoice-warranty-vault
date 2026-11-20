@@ -27,6 +27,22 @@ A React Native (Expo) Android/iOS app backed by NestJS, PostgreSQL and Prisma.
 9. To enable Google login, create OAuth Web, Android, and iOS client IDs in Google Cloud Console. Use Android package `com.invoicevault.mobile` and iOS bundle ID `com.invoicevault.mobile`; set the three `EXPO_PUBLIC_GOOGLE_*_CLIENT_ID` values in `apps/mobile/.env` and put all allowed IDs, comma-separated, in API `GOOGLE_CLIENT_IDS`. Set up the OAuth consent screen and test-user access if the app is in Testing mode. Never put a client secret in the mobile app.
 10. In a separate terminal, run `npm run dev:mobile`. Restart Expo and reload the app after changing config. The API URL is embedded in the app and must not contain secrets. Use HTTPS outside local development. Google OAuth uses the `invoicevault` app scheme and needs a development build with matching Android SHA-1/iOS bundle settings; Expo Go cannot use this app's native Google client IDs.
 
+## Phone-local invoice files
+
+New invoices added by the mobile app are copied into the app's private document storage on that phone. The user can enter details manually or send a temporary copy to the API and Gemini for automatic extraction; the device-extraction endpoint buffers the copy in memory without writing it to server storage. Invoice metadata and confirmed details are stored in the database. AI provider data handling is subject to the provider's terms. These files do not sync to other devices and can be lost if the app is uninstalled, its data is cleared, or the phone is lost. Keep an independent backup of important invoices. Older server-stored invoices continue to use the server download flow. Deploy the updated API before installing a mobile build that uses device-only storage.
+
+## Neon PostgreSQL
+
+`neon deploy` writes connection settings to the ignored root `.env.local`. The API loads process environment variables first, then root `.env.local`, then `apps/api/.env`; restart the API after changing them. The existing Prisma client works with Neon. For Render, set the pooled `DATABASE_URL` as a private environment variable; `.env.local` is not deployed.
+
+Prisma CLI commands do not automatically load the root `.env.local`. For schema changes, use the direct connection and review changes on a non-production branch first. For example, the following targets the Neon database and can change its schema:
+
+```bash
+node --env-file=.env.local -e 'const {spawnSync}=require("node:child_process"); const r=spawnSync("npm",["run","db:push"],{stdio:"inherit",env:{...process.env,DATABASE_URL:process.env.DATABASE_URL_UNPOOLED}});process.exit(r.status ?? 1)'
+```
+
+Use versioned migrations for production deployments; `db push` is not a migration history. Do not commit connection strings or other secrets.
+
 ## Invoice image compression
 JPEG/PNG invoices are optimized after successful AI extraction (the first extraction reads the original upload), or after manual confirmation. Sharp auto-orients images, limits the longest edge to 3200 pixels without enlarging, and encodes WebP at quality 90. Only smaller results replace the original. PDFs, unsupported/multipage images, and decoder failures are left untouched.
 

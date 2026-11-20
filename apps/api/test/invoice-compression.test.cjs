@@ -115,3 +115,18 @@ test('AI extraction uses original bytes before compression and reports savings',
   assert.deepEqual(calls, ['extract', 'optimize', 'persist', 'remove old.png']);
   assert.equal(result.compression.savedBytes, 50);
 });
+
+test('device extraction uses supplied bytes without storing the file and checks ownership and MIME', async () => {
+  const invoice = { id: '1', userId: 'owner', fileKey: 'device:', mimeType: 'application/pdf' };
+  const calls = [];
+  const db = { invoice: { findFirst: async ({ where }) => where.id === invoice.id && where.userId === invoice.userId ? invoice : null } };
+  const extraction = { extract: async (bytes, mimeType) => { calls.push([bytes.toString(), mimeType]); return { items: [] }; } };
+  const controller = new Controller(db, extraction, {}, {});
+  const file = { buffer: Buffer.from('invoice'), mimetype: 'application/pdf' };
+  const result = await controller.extractDevice('owner', '1', file);
+  assert.deepEqual(calls, [['invoice', 'application/pdf']]);
+  assert.equal(result.compression, null);
+  await assert.rejects(controller.extractDevice('other', '1', file), { status: 404 });
+  await assert.rejects(controller.extractDevice('owner', '1', { ...file, mimetype: 'image/png' }), { status: 400 });
+  await assert.rejects(controller.extractDevice('owner', '1', undefined), { status: 400 });
+});

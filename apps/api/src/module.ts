@@ -19,6 +19,11 @@ const chatPhotoOptions = {
   fileFilter: (_req: any, file: Express.Multer.File, cb: any) => cb(['image/jpeg','image/png','image/webp'].includes(file.mimetype) ? null : new BadRequestException('Only JPEG, PNG, or WebP photos are accepted'), ['image/jpeg','image/png','image/webp'].includes(file.mimetype)),
   storage: memoryStorage(),
 };
+const deviceExtractionOptions = {
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  fileFilter: (_req: any, file: Express.Multer.File, cb: any) => cb(null, ['application/pdf', 'image/jpeg', 'image/png'].includes(file.mimetype)),
+  storage: memoryStorage(),
+};
 const googleOAuthClient = new OAuth2Client();
 const UPLOAD_DIR = resolve(process.env.UPLOAD_DIR || './uploads');
 const fileOptions = {
@@ -86,8 +91,16 @@ class ApiController {
         }
       }
     });
-    await this.storage.remove(invoice.fileKey);
+    if (invoice.fileKey !== 'device:') await this.storage.remove(invoice.fileKey);
     return { deleted: true };
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('invoices/device')
+  async createDeviceInvoice(@CurrentUser() userId: string, @Body() body: { mimeType?: string }) {
+    if (!body || !['application/pdf', 'image/jpeg', 'image/png'].includes(body.mimeType || '')) throw new BadRequestException('PDF, JPEG or PNG required');
+    const invoice = await this.db.invoice.create({ data: { userId, fileKey: 'device:', mimeType: body.mimeType! } });
+    return { id: invoice.id, status: invoice.status };
   }
 
   @UseGuards(AuthGuard)
@@ -100,6 +113,7 @@ class ApiController {
   }
 
   private async optimizeStoredInvoice(invoice: { id: string; fileKey: string; mimeType: string }) {
+    if (invoice.fileKey === 'device:') return null;
     let optimized: Awaited<ReturnType<InvoiceStorage['optimize']>> = null;
     try {
       optimized = await this.storage.optimize(invoice.fileKey, invoice.mimeType);
@@ -127,9 +141,20 @@ class ApiController {
     return invoice;
   }
   @UseGuards(AuthGuard)
+  @Post('invoices/:id/extract-device')
+  @UseInterceptors(FileInterceptor('file', deviceExtractionOptions))
+  async extractDevice(@CurrentUser() userId: string, @Param('id') id: string, @UploadedFile() file?: Express.Multer.File) {
+    const invoice = await this.ownedInvoice(userId, id);
+    if (invoice.fileKey !== 'device:') throw new BadRequestException('Invoice is not stored on the device');
+    if (!file?.buffer?.length || file.mimetype !== invoice.mimeType) throw new BadRequestException('A matching PDF, JPEG or PNG file is required (max 10MB)');
+    const preview = await this.extraction.extract(file.buffer, file.mimetype);
+    return { invoiceId: id, preview, requiresReview: true, compression: null };
+  }
+  @UseGuards(AuthGuard)
   @Post('invoices/:id/extract')
   async extract(@CurrentUser() userId: string, @Param('id') id: string) {
     const invoice = await this.ownedInvoice(userId, id);
+    if (invoice.fileKey === 'device:') throw new BadRequestException('Send the device file to the device extraction endpoint');
     const file = await this.storage.readForExtraction(invoice.fileKey);
     // AI receives the original upload before storage is optimized.
     const preview = await this.extraction.extract(file.bytes, invoice.mimeType);
@@ -140,6 +165,7 @@ class ApiController {
   @Get('invoices/:id/download-link')
   async downloadLink(@CurrentUser() userId: string, @Param('id') id: string) {
     const invoice = await this.ownedInvoice(userId,id);
+    if (invoice.fileKey === 'device:') throw new NotFoundException('Invoice file is stored on the original device');
     const url = await this.storage.downloadUrl(invoice.fileKey);
     if (!url) throw new ServiceUnavailableException('Set S3_BUCKET to enable mobile invoice viewing');
     return { url, expiresInSeconds:60 };
@@ -148,6 +174,7 @@ class ApiController {
   @Get('invoices/:id/file')
   async download(@CurrentUser() userId: string, @Param('id') id: string, @Res() res: any) {
     const invoice = await this.ownedInvoice(userId, id);
+    if (invoice.fileKey === 'device:') throw new NotFoundException('Invoice file is stored on the original device');
     const url = await this.storage.downloadUrl(invoice.fileKey);
     if (url) return res.redirect(url);
     const local = await this.storage.downloadLocal(invoice.fileKey);

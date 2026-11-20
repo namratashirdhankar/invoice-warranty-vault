@@ -20,6 +20,10 @@ function apiUrl(): string {
   if (!/^https?:\/\/[^/\s?#]+(?:\/[^\s?#]*)?\/?$/i.test(value)) throw new Error('API_URL must be a valid HTTP or HTTPS URL.');
   return value.replace(/\/+$/, '');
 }
+function deviceInvoicePath(id: string): string {
+  if (!FileSystem.documentDirectory) throw new Error('Phone storage is unavailable');
+  return `${FileSystem.documentDirectory}invoices/${encodeURIComponent(id)}`;
+}
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 15000): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -127,7 +131,7 @@ export default function App() {
   async function googleLogin() {
     const platformClientId=Platform.OS==='ios'?googleConfig.iosClientId:Platform.OS==='android'?googleConfig.androidClientId:googleConfig.webClientId;
     const missing = [!googleConfig.webClientId && 'EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID', !platformClientId && (Platform.OS === 'ios' ? 'EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID' : Platform.OS === 'android' ? 'EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID' : 'EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID')].filter(Boolean);
-    if (missing.length) { Alert.alert('Google sign-in setup required',`Missing build settings: ${Array.from(new Set(missing)).join(', ')}. Set them in the selected EAS build environment, rebuild, and install the new app. For local Expo, use apps/mobile/.env and restart Expo.`); return; }
+    if (missing.length || !platformClientId) { Alert.alert('Google sign-in setup required',`Missing build settings: ${Array.from(new Set(missing)).join(', ')}. Set them in the selected EAS build environment, rebuild, and install the new app. For local Expo, use apps/mobile/.env and restart Expo.`); return; }
     if (!googleRequest) { Alert.alert('Google sign-in', 'Google sign-in is still initializing. Please try again in a moment.'); return; }
     setAuthAction('google');setBusy(true);
     try {
@@ -158,9 +162,15 @@ export default function App() {
     setSharingInvoiceId(invoice.id);
     try {
       if (!await Sharing.isAvailableAsync()) throw new Error('File sharing is unavailable on this device');
+      const mimeType = invoice.mimeType || 'application/pdf';
+      if (invoice.fileKey === 'device:') {
+        const local = deviceInvoicePath(invoice.id);
+        if (!(await FileSystem.getInfoAsync(local)).exists) throw new Error('This invoice file is not on this phone. It is only available on the device where it was saved.');
+        await Sharing.shareAsync(local, {mimeType, dialogTitle:'Share invoice file', UTI:mimeType==='application/pdf'?'com.adobe.pdf':'public.image'});
+        return;
+      }
       const cache = FileSystem.cacheDirectory;
       if (!cache) throw new Error('Could not access temporary storage');
-      const mimeType = invoice.mimeType || 'application/pdf';
       const extension = mimeType === 'application/pdf' ? 'pdf' : mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg';
       const target = `${cache}invoice-${invoice.id}-${Date.now()}.${extension}`;
       const downloaded = await FileSystem.downloadAsync(`${apiUrl()}/invoices/${invoice.id}/file`,target,{headers:{Authorization:`Bearer ${token}`}});
@@ -173,7 +183,14 @@ export default function App() {
     Alert.alert('Delete invoice?', 'This permanently deletes the invoice file and its warranty records. Products used by other invoices will be kept.', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete', style: 'destructive', onPress: async () => {
-        try { await request('/invoices/' + invoice.id, { method: 'DELETE' }); await refresh(); Alert.alert('Deleted', 'Invoice removed.'); }
+        try {
+          await request('/invoices/' + invoice.id, { method: 'DELETE' });
+          if (invoice.fileKey === 'device:') {
+            try { await FileSystem.deleteAsync(deviceInvoicePath(invoice.id), { idempotent: true }); }
+            catch { Alert.alert('Local file remains', 'The invoice record was deleted, but its file could not be removed from this phone.'); }
+          }
+          await refresh(); Alert.alert('Deleted', 'Invoice removed.');
+        }
         catch (error) { Alert.alert('Could not delete invoice', String(error)); }
       } },
     ]);
@@ -186,41 +203,70 @@ export default function App() {
   }
   useEffect(() => { if (token) refresh(); }, [token]);
   async function upload() {
+    const useExtraction = await new Promise<boolean | null>(resolve => Alert.alert(
+      'Invoice processing',
+      'The original stays on this phone. For automatic extraction, a temporary copy is sent to the API and Gemini. Choose manual entry to avoid sending the file.',
+      [{ text:'Cancel', style:'cancel', onPress:()=>resolve(null) }, { text:'Manual entry', onPress:()=>resolve(false) }, { text:'Use AI', onPress:()=>resolve(true) }],
+      { cancelable:false }
+    ));
+    if (useExtraction === null) return;
     const selected = await DocumentPicker.getDocumentAsync({ type:['application/pdf','image/jpeg','image/png'],copyToCacheDirectory:true });
     if (selected.canceled) return;
     const file = selected.assets[0];
-    setUploadStatus('Uploading invoice…');
+    setUploadStatus('Saving invoice on this phone…');
     setBusy(true);
+    let pendingPath = '';
+    let createdId = '';
     try {
-      const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.mimeType || 'application/pdf' } as unknown as Blob);
-      // React Native's XMLHttpRequest supports local file URIs; Expo fetch does not.
-      const result = await new Promise<{ id: string }>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', apiUrl() + '/invoices/upload');
-        xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-        xhr.onload = () => {
-          try {
-            const data = JSON.parse(xhr.responseText);
-            if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-            else reject(new Error(data.message || 'Upload failed'));
-          } catch { reject(new Error('Invalid server response')); }
-        };
-        xhr.onerror = () => reject(new Error('Network error while uploading'));
-        xhr.send(form);
-      });
+      const mimeType = file.mimeType || (file.name.toLowerCase().endsWith('.png') ? 'image/png' : /\.jpe?g$/i.test(file.name) ? 'image/jpeg' : 'application/pdf');
+      if (!['application/pdf','image/jpeg','image/png'].includes(mimeType)) throw new Error('Choose a PDF, JPEG or PNG file.');
+      if (file.size && file.size > 10 * 1024 * 1024) throw new Error('The invoice must be 10 MB or smaller.');
+      const directory = deviceInvoicePath('').replace(/\/$/, '') + '/';
+      await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
+      pendingPath = `${directory}pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await FileSystem.copyAsync({ from: file.uri, to: pendingPath });
+      const result = await request('/invoices/device', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mimeType}) });
+      createdId = result.id;
+      await FileSystem.moveAsync({ from: pendingPath, to: deviceInvoicePath(result.id) });
+      pendingPath = '';
+      createdId = '';
       setInvoiceId(result.id);
-      setUploadStatus('Reading invoice details with AI…');
+      setUploadStatus(useExtraction ? 'Sending a temporary copy for AI extraction…' : 'Preparing manual review…');
       try {
-        const extracted = await request('/invoices/' + result.id + '/extract', { method:'POST' });
+        if (!useExtraction) {
+          setDraft({ invoiceNumber:'',seller:'',purchaseDate:'',items:[{name:''}] });
+          setTab('review');
+          return;
+        }
+        const form = new FormData();
+        form.append('file', { uri: deviceInvoicePath(result.id), name: file.name, type: mimeType } as unknown as Blob);
+        const extracted = await new Promise<any>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', apiUrl() + '/invoices/' + result.id + '/extract-device');
+          xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+          xhr.timeout = 120000;
+          xhr.onload = () => {
+            try {
+              const data = JSON.parse(xhr.responseText);
+              if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+              else reject(new Error(data.message || 'Extraction failed'));
+            } catch { reject(new Error('Invalid server response')); }
+          };
+          xhr.onerror = () => reject(new Error('Network error during extraction'));
+          xhr.ontimeout = () => reject(new Error('Extraction timed out'));
+          xhr.send(form);
+        });
         setDraft({ ...extracted.preview, items: extracted.preview.items?.length ? extracted.preview.items : [{ name:'' }] });
-        setTab('review');
       } catch {
         setDraft({ invoiceNumber:'',seller:'',purchaseDate:'',items:[{name:''}] });
-        setTab('review');
-        Alert.alert('Manual review', 'AI extraction unavailable. Enter your purchase details manually.');
+        Alert.alert('Manual review', 'Your file is saved on this phone, but AI extraction failed. Enter the details manually.');
       }
-    } catch(e) { Alert.alert('Upload failed',String(e)); } finally { setUploadStatus(''); setBusy(false); }
+      setTab('review');
+    } catch(e) {
+      if (pendingPath) await FileSystem.deleteAsync(pendingPath, { idempotent:true }).catch(()=>{});
+      if (createdId) await request('/invoices/' + createdId, { method:'DELETE' }).catch(()=>{});
+      Alert.alert('Could not save invoice',String(e));
+    } finally { setUploadStatus(''); setBusy(false); }
   }
   async function saveSupportContact(productId:string) {
     if (!supportName.trim() || !(supportPhone.trim() || supportEmail.trim() || supportWebsite.trim())) { Alert.alert('Contact details needed','Enter a contact name and at least a phone, email, or website.'); return; }
