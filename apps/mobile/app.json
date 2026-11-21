@@ -5,6 +5,7 @@
     "scheme": ["invoicevault", "com.invoicevault.mobile"],
     "version": "0.1.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.invoicevault.mobile"
